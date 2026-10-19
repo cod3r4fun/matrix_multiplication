@@ -65,16 +65,57 @@ int main(int argc, char **argv)
 
     start_time = MPI_Wtime();
     /* =========================== AREA OF INTEREST ============================ */
+#define START_ROW(r, N, P) ((r) * ((N) / (P)) + ((r) < ((N) % (P)) ? (r) : ((N) % (P))))
 
-    /* Do the matrix product */
-    for (i=0; i<Ndim; i++){
-		for (j=0; j<Mdim; j++){
-			for(k=0;k<Pdim;k++){
-				/* C(i,j) = sum(over k) A(i,k) * B(k,j) */
-				*(C+(i*Ndim+j)) += *(A+(i*Ndim+k)) *  *(B+(k*Pdim+j));
-			}
-		}
-	}
+    if (rank != 0) {
+        A = (double *)malloc(Ndim * Pdim * sizeof(double));
+        C = (double *)calloc(Ndim * Mdim, sizeof(double));
+    }
+
+    MPI_Bcast(A, Ndim * Pdim, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(B, Pdim * Mdim, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    int starting_row_pos = START_ROW(rank, Ndim, size);
+    int ending_row_pos   = START_ROW(rank + 1, Ndim, size);
+    int rows_accumulated = ending_row_pos - starting_row_pos;
+
+
+    for (i = starting_row_pos; i < ending_row_pos; i++) {
+        for (k = 0; k < Pdim; k++) {
+            double a_ik = *(A + (i * Pdim + k));
+            for (j = 0; j < Mdim; j++) {
+                *(C + (i * Mdim + j)) += a_ik * *(B + (k * Mdim + j));
+            }
+        }
+    }
+
+    for (int step = 1; step < size; step *= 2) {
+        if (rank % (2 * step) == 0) {
+            int src = rank + step;
+            if (src < size) {
+                int subtree_end_rank = (src + step < size) ? (src + step) : size;
+                int recv_start_row   = START_ROW(src, Ndim, size);
+                int recv_rows        = START_ROW(subtree_end_rank, Ndim, size) - recv_start_row;
+
+                MPI_Recv(C + (recv_start_row * Mdim), recv_rows * Mdim, MPI_DOUBLE,
+                         src, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+                rows_accumulated += recv_rows;
+            }
+        }
+        else {
+            int dst = rank - step;
+            MPI_Send(C + (starting_row_pos * Mdim), rows_accumulated * Mdim, MPI_DOUBLE,
+                        dst, 0, MPI_COMM_WORLD);
+            break;
+        }
+    }
+
+    if (rank != 0) {
+        free(A);
+        free(C);
+    }
+    
 
     /* ========================= END AREA OF INTEREST ========================== */
 	run_time = MPI_Wtime() - start_time;
